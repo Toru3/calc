@@ -1,0 +1,15 @@
+int = @{ (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) | "0" }
+ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+uniop = @{ "+" | "-" }
+add = @{ "+" | "-" }
+mul = @{ "*" | "/" | "%" }
+pow = @{ "^" }
+expr = { term3 ~ (add ~ term3)* }
+term3 = { term2 ~ (mul ~ term2)* }
+term2 = { term1 ~ (pow ~ term2)* }
+term1 = { uniop? ~ term0 }
+term0 = { func | "(" ~ expr ~ ")" | atom }
+atom = { int | ident }
+func = { ident ~ "(" ~ args ~ ")" }
+args = { expr ~ ("," ~ expr)* | "" }
+WHITESPACE = _{ " " | "\t" | NEWLINE }
