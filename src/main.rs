@@ -88,19 +88,8 @@ fn ast_func(func: pest::iterators::Pair<Rule>) -> Ast {
     let func_name = iter.next().unwrap();
     assert_eq!(func_name.as_rule(), Rule::ident);
     let name = func_name.as_str().to_owned();
-    let args = iter.next().unwrap();
-    assert_eq!(args.as_rule(), Rule::args);
-    let args = args.into_inner().map(ast_expr).collect::<Vec<_>>();
+    let args = iter.map(ast_expr).collect::<Vec<_>>();
     Ast::Func { name, args }
-}
-
-fn ast_atom(atom: pest::iterators::Pair<Rule>) -> Ast {
-    let t = atom.into_inner().next().unwrap();
-    match t.as_rule() {
-        Rule::int => Ast::Num(t.as_str().parse::<i64>().unwrap()),
-        Rule::ident => Ast::Ident(t.as_str().to_owned()),
-        _ => unreachable!(),
-    }
 }
 
 fn ast_term0(term0: pest::iterators::Pair<Rule>) -> Ast {
@@ -111,7 +100,8 @@ fn ast_term0(term0: pest::iterators::Pair<Rule>) -> Ast {
             println!("{:?}", t);
             ast_expr(t)
         }
-        Rule::atom => ast_atom(t),
+        Rule::int => Ast::Num(t.as_str().parse::<i64>().unwrap()),
+        Rule::ident => Ast::Ident(t.as_str().to_owned()),
         _ => unreachable!(),
     }
 }
@@ -119,91 +109,48 @@ fn ast_term0(term0: pest::iterators::Pair<Rule>) -> Ast {
 fn ast_term1(term1: pest::iterators::Pair<Rule>) -> Ast {
     let mut iter = term1.into_inner();
     let first = iter.next().unwrap();
-    if first.as_rule() == Rule::uniop {
-        let op = match first.as_str() {
-            "+" => UniOp::Plus,
-            "-" => UniOp::Neg,
-            _ => unreachable!(),
-        };
-        let second = iter.next().unwrap();
-        let expr = Box::new(ast_term0(second));
-        Ast::UniOp { op, expr }
-    } else {
-        assert_eq!(first.as_rule(), Rule::term0);
+    if first.as_rule() == Rule::term0 {
         ast_term0(first)
+    } else {
+        let op = match first.as_rule() {
+            Rule::plus => UniOp::Plus,
+            Rule::neg => UniOp::Neg,
+            _ => unreachable!(),
+        };
+        Ast::UniOp {
+            op,
+            expr: Box::new(ast_term0(iter.next().unwrap())),
+        }
     }
 }
 
-fn ast_term2(term2: pest::iterators::Pair<Rule>) -> Ast {
-    let mut iter = term2.into_inner();
-    let first = iter.next().unwrap();
-    assert_eq!(first.as_rule(), Rule::term1);
-    let mut ast = ast_term1(first);
-    if let Some(op) = iter.next() {
-        assert_eq!(op.as_rule(), Rule::pow);
-        let op = match op.as_str() {
-            "^" => BinOp::Pow,
-            _ => unreachable!(),
-        };
-        let right = iter.next().unwrap();
-        assert_eq!(right.as_rule(), Rule::term2);
-        let right = Box::new(ast_term2(right));
-        ast = Ast::BinOp {
-            op,
-            left: Box::new(ast),
-            right,
-        };
+fn binop(left: Ast, op: pest::iterators::Pair<Rule>, right: Ast) -> Ast {
+    let op = match op.as_rule() {
+        Rule::add => BinOp::Add,
+        Rule::sub => BinOp::Sub,
+        Rule::mul => BinOp::Mul,
+        Rule::div => BinOp::Div,
+        Rule::rem => BinOp::Rem,
+        Rule::pow => BinOp::Pow,
+        _ => unreachable!(),
+    };
+    Ast::BinOp {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
     }
-    dbg!(ast)
 }
 
-fn ast_term3(term3: pest::iterators::Pair<Rule>) -> Ast {
-    let mut iter = term3.into_inner();
-    let first = iter.next().unwrap();
-    assert_eq!(first.as_rule(), Rule::term2);
-    let mut ast = ast_term2(first);
-    while let Some(op) = iter.next() {
-        assert_eq!(op.as_rule(), Rule::mul);
-        let op = match op.as_str() {
-            "*" => BinOp::Mul,
-            "/" => BinOp::Div,
-            "%" => BinOp::Rem,
-            _ => unreachable!(),
-        };
-        let right = iter.next().unwrap();
-        assert_eq!(right.as_rule(), Rule::term2);
-        let right = Box::new(ast_term2(right));
-        ast = Ast::BinOp {
-            op,
-            left: Box::new(ast),
-            right,
-        };
-    }
-    dbg!(ast)
-}
-
-fn ast_expr(expr: pest::iterators::Pair<Rule>) -> Ast {
-    let mut iter = expr.into_inner();
-    let first = iter.next().unwrap();
-    assert_eq!(first.as_rule(), Rule::term3);
-    let mut ast = ast_term3(first);
-    while let Some(op) = iter.next() {
-        assert_eq!(op.as_rule(), Rule::add);
-        let op = match op.as_str() {
-            "+" => BinOp::Add,
-            "-" => BinOp::Sub,
-            _ => unreachable!(),
-        };
-        let right = iter.next().unwrap();
-        assert_eq!(right.as_rule(), Rule::term3);
-        let right = Box::new(ast_term3(right));
-        ast = Ast::BinOp {
-            op,
-            left: Box::new(ast),
-            right,
-        };
-    }
-    dbg!(ast)
+fn ast_expr(pair: pest::iterators::Pair<Rule>) -> Ast {
+    use pest::prec_climber::{Assoc, Operator, PrecClimber};
+    let climber = PrecClimber::new(vec![
+        Operator::new(Rule::add, Assoc::Left) | Operator::new(Rule::sub, Assoc::Left),
+        Operator::new(Rule::mul, Assoc::Left)
+            | Operator::new(Rule::div, Assoc::Left)
+            | Operator::new(Rule::rem, Assoc::Left),
+        Operator::new(Rule::pow, Assoc::Right),
+    ]);
+    climber.climb(pair.into_inner(), ast_term1, binop)
 }
 
 fn make_ast(parsed: pest::iterators::Pairs<Rule>) -> Vec<Ast> {
