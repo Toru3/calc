@@ -1,3 +1,4 @@
+use lazy_static::lazy_static;
 use pest::Parser;
 use pest_derive::Parser;
 
@@ -45,7 +46,7 @@ impl std::fmt::Display for BinOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Ast {
-    Num(i64),
+    Num(num::BigRational),
     Ident(String),
     BinOp {
         op: BinOp,
@@ -86,6 +87,13 @@ macro_rules! uniop_helper {
 }
 
 impl Ast {
+    fn num_from_u32(n: u32) -> Self {
+        let n = num::BigInt::new(num_bigint::Sign::Plus, vec![n]);
+        Ast::Num(num::BigRational::from_integer(n))
+    }
+    fn num_from_str(s: &str) -> Self {
+        Ast::Num(s.parse().unwrap())
+    }
     binop_helper!(add, Add);
     binop_helper!(sub, Sub);
     binop_helper!(mul, Mul);
@@ -97,6 +105,29 @@ impl Ast {
     fn func(name: String, args: Vec<Ast>) -> Self {
         Ast::Func { name, args }
     }
+    fn to_infix(&self) -> String {
+        match self {
+            Ast::Num(n) => format!("({})", n),
+            Ast::Ident(s) => s.to_string(),
+            Ast::BinOp { op, left, right } => format!("({} {} {})", left.to_infix(), op, right.to_infix()),
+            Ast::UniOp { op, expr } => format!("({} {})", op, expr.to_infix()),
+            Ast::Func { name, args } => {
+                let mut s = name.to_string();
+                s += "(";
+                for arg in args {
+                    s += &arg.to_infix();
+                }
+                s += ")";
+                s
+            }
+            //Ast::Dummy => write!(f, "X"),
+        }
+    }
+}
+lazy_static! {
+    static ref ZERO: Ast = Ast::num_from_u32(0);
+    static ref ONE: Ast = Ast::num_from_u32(1);
+    static ref TWO: Ast = Ast::num_from_u32(2);
 }
 
 impl std::fmt::Display for Ast {
@@ -136,7 +167,7 @@ fn ast_term0(term0: pest::iterators::Pair<Rule>) -> Ast {
             println!("{:?}", t);
             ast_expr(t)
         }
-        Rule::int => Ast::Num(t.as_str().parse::<i64>().unwrap()),
+        Rule::int => Ast::num_from_str(t.as_str()),
         Rule::ident => Ast::Ident(t.as_str().to_owned()),
         _ => unreachable!(),
     }
@@ -205,7 +236,10 @@ fn make_ast(parsed: pest::iterators::Pairs<Rule>) -> Vec<Ast> {
 
 fn eval(a: Ast) -> Result<f64, String> {
     let r = match a {
-        Ast::Num(n) => n as f64,
+        Ast::Num(n) => {
+            n.numer().to_str_radix(10).parse::<f64>().unwrap()
+                / n.denom().to_str_radix(10).parse::<f64>().unwrap()
+        }
         Ast::Ident(name) => return Err(format!("undefined variable: {}", name)),
         Ast::BinOp { op, left, right } => match op {
             BinOp::Add => eval(*left)? + eval(*right)?,
@@ -248,7 +282,7 @@ fn diff_add(left: &Ast, right: &Ast, v: &str) -> Ast {
         (true, true) => Ast::add(derivative(left, v), derivative(right, v)),
         (true, false) => derivative(left, v),
         (false, true) => derivative(right, v),
-        (false, false) => Ast::Num(0),
+        (false, false) => ZERO.clone(),
     }
 }
 
@@ -257,7 +291,7 @@ fn diff_sub(left: &Ast, right: &Ast, v: &str) -> Ast {
         (true, true) => Ast::sub(derivative(left, v), derivative(right, v)),
         (true, false) => derivative(left, v),
         (false, true) => Ast::neg(derivative(right, v)),
-        (false, false) => Ast::Num(0),
+        (false, false) => ZERO.clone(),
     }
 }
 
@@ -269,7 +303,7 @@ fn diff_mul(left: &Ast, right: &Ast, v: &str) -> Ast {
         ),
         (true, false) => Ast::mul(derivative(left, v), right.clone()),
         (false, true) => Ast::mul(left.clone(), derivative(right, v)),
-        (false, false) => Ast::Num(0),
+        (false, false) => ZERO.clone(),
     }
 }
 
@@ -279,15 +313,15 @@ fn diff_div(left: &Ast, right: &Ast, v: &str) -> Ast {
             Ast::div(derivative(left, v), right.clone()),
             Ast::div(
                 Ast::mul(left.clone(), derivative(right, v)),
-                Ast::pow(right.clone(), Ast::Num(2)),
+                Ast::pow(right.clone(), TWO.clone()),
             ),
         ),
         (true, false) => Ast::div(derivative(left, v), right.clone()),
         (false, true) => Ast::neg(Ast::div(
-            Ast::mul(left.clone(), right.clone()),
-            Ast::pow(right.clone(), Ast::Num(2)),
+            Ast::mul(left.clone(), derivative(right, v)),
+            Ast::pow(right.clone(), TWO.clone()),
         )),
-        (false, false) => Ast::Num(0),
+        (false, false) => ZERO.clone(),
     }
 }
 
@@ -300,14 +334,14 @@ fn diff_pow(left: &Ast, right: &Ast, v: &str) -> Ast {
                     derivative(right, v),
                     Ast::func("log".to_string(), vec![left.clone()]),
                 ),
-                Ast::mul(right.clone(), Ast::div(derivative(left, v), left.clone())),
+                Ast::div(Ast::mul(right.clone(), derivative(left, v)), left.clone()),
             ),
         ),
         (true, false) => Ast::mul(
             right.clone(),
             Ast::mul(
                 derivative(left, v),
-                Ast::pow(left.clone(), Ast::sub(right.clone(), Ast::Num(1))),
+                Ast::pow(left.clone(), Ast::sub(right.clone(), ONE.clone())),
             ),
         ),
         (false, true) => Ast::mul(
@@ -317,7 +351,7 @@ fn diff_pow(left: &Ast, right: &Ast, v: &str) -> Ast {
                 derivative(right, v),
             ),
         ),
-        (false, false) => Ast::Num(0),
+        (false, false) => ZERO.clone(),
     }
 }
 
@@ -334,11 +368,16 @@ fn diff_func_aux(name: &str, args: &[Ast], v: &str) -> Ast {
             q = Some(d);
         }
     }
-    q.unwrap_or(Ast::Num(0))
+    q.unwrap_or_else(|| ZERO.clone())
 }
 
 fn diff_func(name: &str, args: &[Ast], v: &str) -> Ast {
     match name {
+        "exp" => Ast::mul(
+            Ast::func("exp".to_string(), args.to_vec()),
+            derivative(&args[0], v),
+        ),
+        "log" => Ast::div(derivative(&args[0], v), args[0].clone()),
         "sin" => Ast::mul(
             Ast::func("cos".to_string(), args.to_vec()),
             derivative(&args[0], v),
@@ -347,21 +386,25 @@ fn diff_func(name: &str, args: &[Ast], v: &str) -> Ast {
             Ast::func("sin".to_string(), args.to_vec()),
             derivative(&args[0], v),
         )),
+        "tan" => Ast::div(
+            derivative(&args[0], v),
+            Ast::pow(Ast::func("cos".to_string(), args.to_vec()), TWO.clone()),
+        ),
         _ => diff_func_aux(name, args, v),
     }
 }
 
 fn derivative(a: &Ast, v: &str) -> Ast {
     if !have(a, v) {
-        return Ast::Num(0);
+        return ZERO.clone();
     }
     match a {
-        Ast::Num(_) => Ast::Num(0),
+        Ast::Num(_) => ZERO.clone(),
         Ast::Ident(x) => {
             if x == v {
-                Ast::Num(1)
+                ONE.clone()
             } else {
-                Ast::Num(0)
+                ZERO.clone()
             }
         }
         Ast::BinOp { op, left, right } => match op {
@@ -381,71 +424,74 @@ fn derivative(a: &Ast, v: &str) -> Ast {
 }
 
 fn simp_add(left: Ast, right: Ast) -> Ast {
-    match (left, right) {
-        (Ast::Num(a), Ast::Num(b)) => Ast::Num(a + b),
-        (Ast::Num(0), x) | (x, Ast::Num(0)) => x,
-        (x, y) => {
-            if x == y {
-                Ast::mul(Ast::Num(2), x)
-            } else {
-                Ast::add(x, y)
-            }
-        }
+    if let (Ast::Num(a), Ast::Num(b)) = (&left, &right) {
+        Ast::Num(a + b)
+    } else if left == ZERO.clone() {
+        right
+    } else if right == ZERO.clone() {
+        left
+    } else if left == right {
+        Ast::mul(TWO.clone(), left)
+    } else {
+        Ast::add(left, right)
     }
 }
 
 fn simp_sub(left: Ast, right: Ast) -> Ast {
-    match (left, right) {
-        (Ast::Num(a), Ast::Num(b)) => Ast::Num(a - b),
-        (Ast::Num(0), x) => Ast::neg(x),
-        (x, Ast::Num(0)) => x,
-        (x, y) => {
-            if x == y {
-                Ast::Num(0)
-            } else {
-                Ast::sub(x, y)
-            }
-        }
+    if let (Ast::Num(a), Ast::Num(b)) = (&left, &right) {
+        Ast::Num(a - b)
+    } else if left == ZERO.clone() {
+        Ast::neg(right)
+    } else if right == ZERO.clone() {
+        left
+    } else if left == right {
+        ZERO.clone()
+    } else {
+        Ast::sub(left, right)
     }
 }
 
 fn simp_mul(left: Ast, right: Ast) -> Ast {
-    match (left, right) {
-        (Ast::Num(a), Ast::Num(b)) => Ast::Num(a * b),
-        (Ast::Num(0), _) | (_, Ast::Num(0)) => Ast::Num(0),
-        (Ast::Num(1), x) | (x, Ast::Num(1)) => x,
-        (x, y) => {
-            if x == y {
-                Ast::pow(x, Ast::Num(2))
-            } else {
-                Ast::mul(x, y)
-            }
-        }
+    if let (Ast::Num(a), Ast::Num(b)) = (&left, &right) {
+        Ast::Num(a * b)
+    } else if left == ZERO.clone() || right == ZERO.clone() {
+        ZERO.clone()
+    } else if left == ONE.clone() {
+        right
+    } else if right == ONE.clone() {
+        left
+    } else if left == right {
+        Ast::pow(left, TWO.clone())
+    } else {
+        Ast::mul(left, right)
     }
 }
 
 fn simp_div(left: Ast, right: Ast) -> Ast {
-    match (left, right) {
-        (Ast::Num(0), _) => Ast::Num(0),
-        (x, Ast::Num(1)) => x,
-        (x, y) => {
-            if x == y {
-                Ast::Num(1)
-            } else {
-                Ast::div(x, y)
-            }
-        }
+    if let (Ast::Num(a), Ast::Num(b)) = (&left, &right) {
+        Ast::Num(a / b)
+    } else if left == ZERO.clone() {
+        ZERO.clone()
+    } else if right == ONE.clone() {
+        left
+    } else if left == right {
+        ONE.clone()
+    } else {
+        Ast::div(left, right)
     }
 }
 
 fn simp_pow(left: Ast, right: Ast) -> Ast {
-    match (left, right) {
-        // 0^0 = 1
-        (_, Ast::Num(0)) => Ast::Num(1),
-        (x, Ast::Num(1)) => x,
-        (Ast::Num(0), _) => Ast::Num(0),
-        (Ast::Num(1), _) => Ast::Num(1),
-        (x, y) => Ast::pow(x, y),
+    if right == ZERO.clone() {
+        ONE.clone()
+    } else if right == ONE.clone() {
+        left
+    } else if left == ZERO.clone() {
+        ZERO.clone()
+    } else if left == ONE.clone() {
+        ONE.clone()
+    } else {
+        Ast::pow(left, right)
     }
 }
 
@@ -466,7 +512,7 @@ fn simp_func(name: &str, args: Vec<Ast>) -> Ast {
 
 fn simple(a: &Ast) -> Ast {
     match a {
-        Ast::Num(n) => Ast::Num(*n),
+        Ast::Num(n) => Ast::Num(n.clone()),
         Ast::Ident(x) => Ast::Ident(x.clone()),
         Ast::BinOp { op, left, right } => match op {
             BinOp::Add => simp_add(simple(left), simple(right)),
@@ -518,6 +564,7 @@ fn main() {
                     d = nd;
                 }
                 println!("{}", d);
+                println!("{}", d.to_infix());
                 println!("{:?}", eval(a));
             }
         } else {

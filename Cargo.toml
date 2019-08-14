@@ -9,3 +9,6 @@ edition = "2018"
 [dependencies]
 pest = "2.0"
 pest_derive = "2.0"
+num = "0.2"
+num-bigint = "0.2"
+lazy_static = "1"
